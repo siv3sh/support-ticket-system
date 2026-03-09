@@ -1,0 +1,173 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="generator" content="Support Ticket System">
+  <title>{% block title %}Support{% endblock %}</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,400;0,9..40,500;0,9..40,600;0,9..40,700;1,9..40,400&display=swap" rel="stylesheet">
+  <style>
+    * { box-sizing: border-box; }
+    :root {
+      --bg: #f8fafc;
+      --surface: #ffffff;
+      --border: #e2e8f0;
+      --text: #0f172a;
+      --text-muted: #64748b;
+      --accent: #0d9488;
+      --accent-hover: #0f766e;
+      --danger: #dc2626;
+      --success: #059669;
+      --open: #10b981;
+      --high: #ea580c;
+      --radius: 12px;
+      --shadow: 0 1px 3px rgba(0,0,0,.06);
+      --shadow-md: 0 4px 12px rgba(0,0,0,.08);
+    }
+    body {
+      font-family: 'DM Sans', system-ui, sans-serif;
+      margin: 0;
+      background: var(--bg);
+      color: var(--text);
+      line-height: 1.5;
+      min-height: 100vh;
+    }
+    .layout {
+      display: flex;
+      min-height: 100vh;
+    }
+    .sidebar {
+      width: 260px;
+      background: var(--text);
+      color: #94a3b8;
+      padding: 1.5rem 0;
+      flex-shrink: 0;
+      display: flex;
+      flex-direction: column;
+    }
+    .sidebar .brand {
+      padding: 0 1.25rem 1.5rem;
+      font-weight: 700;
+      font-size: 1.125rem;
+      color: #fff;
+      letter-spacing: -0.02em;
+    }
+    .sidebar nav a {
+      display: flex;
+      align-items: center;
+      gap: 0.75rem;
+      padding: 0.625rem 1.25rem;
+      color: #94a3b8;
+      text-decoration: none;
+      font-size: 0.9375rem;
+      transition: color .15s, background .15s;
+    }
+    .sidebar nav a:hover {
+      color: #e2e8f0;
+      background: rgba(255,255,255,.06);
+    }
+    .sidebar nav a.active {
+      color: #fff;
+      background: rgba(255,255,255,.1);
+      font-weight: 500;
+    }
+    .main {
+      flex: 1;
+      overflow: auto;
+      padding: 2rem 2.5rem 3rem;
+    }
+    .page-title {
+      font-size: 1.5rem;
+      font-weight: 700;
+      letter-spacing: -0.02em;
+      margin: 0 0 1.5rem;
+      color: var(--text);
+    }
+    .flash {
+      padding: 0.875rem 1rem;
+      border-radius: var(--radius);
+      margin-bottom: 1.25rem;
+      font-size: 0.9375rem;
+    }
+    .flash.error {
+      background: #fef2f2;
+      color: #b91c1c;
+      border: 1px solid #fecaca;
+    }
+    .flash.success, .flash.message {
+      background: #ecfdf5;
+      color: #047857;
+      border: 1px solid #a7f3d0;
+    }
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 0.5rem;
+      padding: 0.5rem 1rem;
+      border-radius: 8px;
+      font-family: inherit;
+      font-size: 0.875rem;
+      font-weight: 500;
+      text-decoration: none;
+      cursor: pointer;
+      border: none;
+      transition: background .15s, color .15s;
+    }
+    .btn-primary {
+      background: var(--accent);
+      color: #fff;
+    }
+    .btn-primary:hover {
+      background: var(--accent-hover);
+      color: #fff;
+    }
+    .btn-ghost {
+      background: transparent;
+      color: var(--text-muted);
+    }
+    .btn-ghost:hover {
+      background: var(--border);
+      color: var(--text);
+    }
+    .sidebar-user {
+      margin-top: auto;
+      padding: 1rem 1.25rem;
+      border-top: 1px solid rgba(255,255,255,.1);
+      font-size: 0.8125rem;
+    }
+    .sidebar-user-name { color: #e2e8f0; display: block; }
+    .sidebar-user-role { color: #94a3b8; display: block; margin-top: 0.25rem; }
+    .sidebar-logout { color: #94a3b8; text-decoration: none; margin-top: 0.5rem; display: inline-block; }
+    .sidebar-logout:hover { color: #fff; }
+    {% block extra_css %}{% endblock %}
+  </style>
+</head>
+<body>
+  <div class="layout">
+    <aside class="sidebar">
+      <div class="brand">Support</div>
+      <nav>
+        <a href="{{ url_for('ticket_list') }}" class="{{ 'active' if request.endpoint == 'ticket_list' and not request.args.get('status') and not request.args.get('domain') else '' }}">All tickets</a>
+        <a href="{{ url_for('ticket_list', status='Open') }}" class="{{ 'active' if request.endpoint == 'ticket_list' and request.args.get('status') == 'Open' else '' }}">Open</a>
+        <a href="{{ url_for('ticket_create') }}" class="{{ 'active' if request.endpoint == 'ticket_create' else '' }}">Create ticket</a>
+      </nav>
+      {% if session.get('user_id') %}
+      <div class="sidebar-user">
+        <span class="sidebar-user-name">{{ session.get('user_name') or session.get('user_email') }}</span>
+        <span class="sidebar-user-role">{{ (session.get('role') or 'agent')|title }}</span>
+        <a href="{{ url_for('logout') }}" class="sidebar-logout">Log out</a>
+      </div>
+      {% endif %}
+    </aside>
+    <main class="main">
+      {% for category, message in get_flashed_messages(with_categories=true) %}
+        <div class="flash {{ category }}">{{ message }}</div>
+      {% endfor %}
+      {% block content %}{% endblock %}
+    </main>
+  </div>
+</body>
+</html>
