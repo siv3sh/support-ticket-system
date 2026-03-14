@@ -1,4 +1,4 @@
-{% extends "main_layout.html" %}
+{% extends "base.html" %}
 {% block title %}{{ ticket._id }} – Support{% endblock %}
 {% block extra_css %}
   .back { margin-bottom: 1.25rem; }
@@ -84,6 +84,8 @@
     box-shadow: 0 0 0 3px rgba(13, 148, 136, .15);
   }
   .reply-box button { min-width: 120px; }
+  .reply-box .btn-ghost { margin-left: 0.5rem; }
+  .reply-box .suggest-msg { font-size: 0.8125rem; color: var(--text-muted); margin-top: 0.5rem; }
   .status-form { display: inline-block; margin-left: 0.5rem; }
   .status-form select { padding: 0.25rem 0.5rem; border-radius: 6px; border: 1px solid var(--border); font-size: 0.8125rem; font-family: inherit; }
 {% endblock %}
@@ -134,8 +136,49 @@
     <h3>Reply to customer</h3>
     <p class="hint">Your reply will be sent by email and saved to this ticket.</p>
     <form method="post" action="{{ url_for('ticket_reply', ticket_id=ticket._id) }}">
-      <textarea name="body" placeholder="Type your reply…" required></textarea>
-      <button type="submit" class="btn btn-primary">Send reply</button>
+      <textarea name="body" id="reply-body" placeholder="Type your reply…" required></textarea>
+      <div>
+        <button type="submit" class="btn btn-primary">Send reply</button>
+        <button type="button" class="btn btn-ghost" id="suggest-reply-btn">Suggest reply</button>
+      </div>
+      <p class="suggest-msg" id="suggest-msg" aria-live="polite"></p>
     </form>
   </div>
+  <script>
+    (function() {
+      var btn = document.getElementById('suggest-reply-btn');
+      var textarea = document.getElementById('reply-body');
+      var msg = document.getElementById('suggest-msg');
+      if (!btn || !textarea) return;
+      btn.addEventListener('click', function() {
+        btn.disabled = true;
+        msg.textContent = 'Generating suggestion…';
+        fetch('{{ url_for("ticket_suggest_reply", ticket_id=ticket._id) }}')
+          .then(function(r) {
+            return r.json().then(function(data) {
+              if (!r.ok) {
+                var e = new Error(data.error || (r.status === 503 ? 'Service unavailable' : 'Request failed'));
+                e.data = data;
+                throw e;
+              }
+              return data;
+            });
+          })
+          .then(function(data) {
+            if (data.suggested_reply) {
+              textarea.value = data.suggested_reply;
+              msg.textContent = 'Suggestion inserted. Edit if needed and send.';
+            } else {
+              msg.textContent = data.error || 'Could not generate suggestion.';
+            }
+          })
+          .catch(function(e) {
+            msg.textContent = (e.data && e.data.error) ? e.data.error : (e.message || 'Could not generate suggestion. Check your connection or try again.');
+          })
+          .finally(function() {
+            btn.disabled = false;
+          });
+      });
+    })();
+  </script>
 {% endblock %}
