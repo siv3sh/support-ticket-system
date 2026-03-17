@@ -1,0 +1,49 @@
+{% extends "main_layout.html" %}
+{% block title %}Profile – Support{% endblock %}
+{% block extra_css %}
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/forms.css') }}">
+{% endblock %}
+{% block content %}
+  <h1 class="page-title">Profile</h1>
+  <div class="form-card form-max-400">
+    {% if not in_users %}
+      <div class="form-banner">
+        You are logged in with a legacy account. Only name, phone, address, and designation can be updated for accounts in the new user system. You can still change your password below.
+      </div>
+    {% endif %}
+    <div class="form-card-header">
+      <h2 class="form-card-title">Account details</h2>
+      <p class="form-card-subtitle">Keep your contact information up to date.</p>
+    </div>
+    <form method="post" action="{{ url_for('profile') }}">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+      <div class="form-group">
+        <label for="name">Name</label>
+        <input type="text" id="name" name="name" value="{{ user.name or '' }}" required {% if not in_users %}readonly{% endif %}>
+      </div>
+      <div class="form-group">
+        <label for="email">Email</label>
+        <input type="text" id="email" value="{{ user.email or '' }}" readonly>
+        <p class="hint">Email cannot be changed.</p>
+      </div>
+      <div class="form-group">
+        <label for="phone">Phone</label>
+        <input type="text" id="phone" name="phone" value="{{ user.phone or '' }}" {% if not in_users %}readonly{% endif %} placeholder="Phone">
+      </div>
+      <div class="form-group">
+        <label for="address">Address</label>
+        <textarea id="address" name="address" {% if not in_users %}readonly{% endif %} placeholder="Address">{{ user.address or '' }}</textarea>
+      </div>
+      <div class="form-group">
+        <label for="designation">Designation</label>
+        <input type="text" id="designation" name="designation" value="{{ user.designation or '' }}" {% if not in_users %}readonly{% endif %} placeholder="Job title">
+      </div>
+      <div class="form-actions">
+        {% if in_users %}
+          <button type="submit" class="btn btn-primary">Save profile</button>
+        {% endif %}
+        <a href="{{ url_for('profile_change_password') }}" class="btn btn-ghost">Change password</a>
+      </div>
+    </form>
+  </div>
+{% endblock %}

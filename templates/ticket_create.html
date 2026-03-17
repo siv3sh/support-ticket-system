@@ -1,22 +1,16 @@
 {% extends "main_layout.html" %}
 {% block title %}Create ticket – Support{% endblock %}
 {% block extra_css %}
-  .form-group { margin-bottom: 1.25rem; }
-  .form-group label { display: block; font-size: 0.875rem; font-weight: 500; margin-bottom: 0.35rem; color: var(--text); }
-  .form-group input, .form-group select, .form-group textarea {
-    width: 100%; padding: 0.5rem 0.75rem; border: 1px solid var(--border); border-radius: 8px; font-size: 0.9375rem; font-family: inherit;
-  }
-  .form-group textarea { min-height: 120px; resize: vertical; }
-  .create-card { max-width: 560px; background: var(--surface); border-radius: var(--radius); box-shadow: var(--shadow); border: 1px solid var(--border); padding: 1.5rem; }
-  .create-card h2 { margin: 0 0 1rem; font-size: 1.125rem; }
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/forms.css') }}">
 {% endblock %}
 {% block content %}
   <h1 class="page-title">Create ticket</h1>
-  <div class="create-card">
+  <div class="form-card">
     {% if not customer_choices %}
       <p class="empty-state" style="margin:0 0 1rem; color: var(--text-muted); font-size: 0.9375rem;">No customers yet. Customers are added when they first email in.</p>
     {% endif %}
     <form method="post" action="{{ url_for('ticket_create') }}">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
       <div class="form-group">
         <label for="customer">Customer (company — email)</label>
         <select id="customer" required>
@@ -52,31 +46,16 @@
       </div>
       <div class="form-group">
         <label for="body">Initial message</label>
-        <textarea id="body" name="body" required placeholder="First message for this ticket…"></textarea>
+        <textarea id="body" name="body" required placeholder="First message for this ticket…" class="textarea-120"></textarea>
       </div>
-      <button type="submit" class="btn btn-primary">Create ticket</button>
-      <a href="{{ url_for('ticket_list') }}" class="btn btn-ghost" style="margin-left: 0.5rem;">Cancel</a>
+      <div class="form-actions">
+        <button type="submit" class="btn btn-primary">Create ticket</button>
+        <a href="{{ url_for('ticket_list') }}" class="btn btn-ghost">Cancel</a>
+      </div>
     </form>
   </div>
-  <script>
-    document.getElementById('customer').addEventListener('change', function() {
-      var v = this.value;
-      if (v) {
-        var parts = v.split('||');
-        document.getElementById('company_id').value = parts[0] || '';
-        document.getElementById('customer_id').value = parts[1] || '';
-      } else {
-        document.getElementById('company_id').value = '';
-        document.getElementById('customer_id').value = '';
-      }
-    });
-    document.querySelector('form').addEventListener('submit', function() {
-      var sel = document.getElementById('customer');
-      if (sel.value) {
-        var parts = sel.value.split('||');
-        document.getElementById('company_id').value = parts[0] || '';
-        document.getElementById('customer_id').value = parts[1] || '';
-      }
-    });
-  </script>
+{% endblock %}
+
+{% block extra_js %}
+  <script src="{{ url_for('static', filename='js/ticket_create.js') }}"></script>
 {% endblock %}

@@ -1,0 +1,146 @@
+{% extends "main_layout.html" %}
+
+{% block title %}Reports – Support{% endblock %}
+
+{% block extra_css %}
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/reports.css') }}">
+{% endblock %}
+
+{% block content %}
+
+<h1 class="page-title">Reports Dashboard</h1>
+
+<div class="report-cards">
+
+<div class="report-card">
+<h3>Total Tickets</h3>
+<p>{{ status_data.total }}</p>
+</div>
+
+<div class="report-card open">
+<h3>Open</h3>
+<p>{{ status_data.open }}</p>
+</div>
+
+<div class="report-card pending">
+<h3>Pending</h3>
+<p>{{ status_data.pending }}</p>
+</div>
+
+<div class="report-card closed">
+<h3>Closed</h3>
+<p>{{ status_data.closed }}</p>
+</div>
+
+<div class="report-card resolution">
+<h3>Avg Resolution</h3>
+<p>{{ avg_resolution }} hrs</p>
+</div>
+
+</div>
+<h2 class="page-title">SLA Monitoring</h2>
+
+<div class="report-cards">
+
+<div class="report-card sla-24" id="sla24">
+<h3>Tickets > 24 hrs</h3>
+<p>{{ sla.older_24 }}</p>
+</div>
+
+<div class="report-card sla-48" id="sla48">
+<h3>Tickets > 48 hrs</h3>
+<p>{{ sla.older_48 }}</p>
+</div>
+
+<div class="report-card sla-unassigned" id="slaUnassigned">
+<h3>Unassigned Tickets</h3>
+<p>{{ sla.unassigned }}</p>
+</div>
+
+</div>
+
+
+<div class="charts-grid">
+
+<!--<div class="chart-box">
+<h3>Ticket Trend</h3>
+<canvas id="ticketTrend"></canvas>
+</div> -->
+
+<div class="chart-box">
+
+<div class="chart-title">
+<h3>Ticket Trend</h3>
+
+<select id="trendFilter">
+<option value="7">7 Days</option>
+<option value="14">14 Days</option>
+<option value="30" selected>1 Month</option>
+</select>
+
+</div>
+
+<canvas id="ticketTrend"></canvas>
+
+</div>
+
+<div class="chart-box">
+<h3>Issue Distribution</h3>
+<canvas id="issueChart"></canvas>
+</div>
+
+</div>
+
+
+
+<div class="charts-grid">
+
+<div class="chart-box full">
+<h3>Tickets by Customer</h3>
+<canvas id="customerChart"></canvas>
+</div>
+
+</div>
+
+
+<div class="agent-table">
+
+<h3>Agent Performance</h3>
+
+<table>
+
+<thead>
+<tr>
+<th>Agent</th>
+<th>Total Tickets</th>
+<th>Closed</th>
+</tr>
+</thead>
+
+<tbody>
+
+{% for a in agent_perf %}
+
+<tr>
+<td>{{ a._id or "Unassigned" }}</td>
+<td>{{ a.tickets }}</td>
+<td>{{ a.closed }}</td>
+</tr>
+
+{% endfor %}
+
+</tbody>
+
+</table>
+
+</div>
+
+{% endblock %}
+
+
+
+{% block extra_js %}
+<script type="application/json" id="report-data">{{ {'trend': trend, 'issues': issue_data, 'customers': customer_data} | tojson }}</script>
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+<script src="{{ url_for('static', filename='js/report_dashboard.js') }}"></script>
+{% endblock %}

@@ -1,59 +1,13 @@
 {% extends "main_layout.html" %}
 {% block title %}Tickets – Support{% endblock %}
 {% block extra_css %}
-  .filters { display: flex; align-items: center; gap: 0.5rem; margin-bottom: 1.5rem; flex-wrap: wrap; }
-  .filter-domain select { padding: 0.5rem 0.75rem; border-radius: 8px; border: 1px solid var(--border); font-family: inherit; font-size: 0.875rem; }
-  .btn-ghost.active { background: var(--border); color: var(--text); }
-  .ticket-domain { font-size: 0.75rem; background: #e0e7ff; color: #3730a3; padding: 0.2rem 0.5rem; border-radius: 6px; }
-  .ticket-customer { font-size: 0.8125rem; color: var(--text-muted); }
-  .card-list { display: flex; flex-direction: column; gap: 0.75rem; }
-  .ticket-card {
-    background: var(--surface);
-    border-radius: var(--radius);
-    box-shadow: var(--shadow);
-    border: 1px solid var(--border);
-    padding: 1rem 1.25rem;
-    display: grid;
-    grid-template-columns: auto 1fr auto auto;
-    align-items: center;
-    gap: 1rem;
-    text-decoration: none;
-    color: inherit;
-    transition: box-shadow .15s, border-color .15s;
-  }
-  .ticket-card:hover {
-    box-shadow: var(--shadow-md);
-    border-color: #cbd5e1;
-  }
-  .ticket-id { font-weight: 600; font-size: 0.9375rem; color: var(--text); }
-  .ticket-subject { font-size: 0.9375rem; color: var(--text); margin: 0; }
-  .ticket-meta { font-size: 0.8125rem; color: var(--text-muted); margin: 0.25rem 0 0; }
-  .badge {
-    display: inline-block;
-    padding: 0.25rem 0.625rem;
-    border-radius: 999px;
-    font-size: 0.75rem;
-    font-weight: 500;
-  }
-  .badge-open { background: #d1fae5; color: #047857; }
-  .badge-pending { background: #fef3c7; color: #b45309; }
-  .badge-closed { background: #f1f5f9; color: #475569; }
-  .badge-high { background: #ffedd5; color: #c2410c; }
-  .badge-medium { background: #dbeafe; color: #1d4ed8; }
-  .ticket-card .actions { margin-left: auto; }
-  .empty-state {
-    text-align: center;
-    padding: 3rem 2rem;
-    background: var(--surface);
-    border-radius: var(--radius);
-    border: 1px dashed var(--border);
-  }
-  .empty-state p { margin: 0; color: var(--text-muted); font-size: 0.9375rem; }
-  .empty-state .empty-title { font-weight: 600; color: var(--text); margin-bottom: 0.5rem; }
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/tickets.css') }}">
 {% endblock %}
 {% block content %}
   <h1 class="page-title">Tickets</h1>
-  <div class="filters">
+  <div class="filters-wrap">
+    <span class="filter-label">Filter:</span>
+    <div class="filters">
     <a href="{{ url_for('ticket_list') }}" class="btn btn-ghost {{ 'active' if not request.args.get('status') and not request.args.get('domain') else '' }}">All</a>
     <a href="{{ url_for('ticket_list', status='Open') }}" class="btn btn-ghost {{ 'active' if request.args.get('status') == 'Open' else '' }}">Open</a>
     <a href="{{ url_for('ticket_list', status='Pending') }}" class="btn btn-ghost {{ 'active' if request.args.get('status') == 'Pending' else '' }}">Pending</a>
@@ -67,12 +21,14 @@
         {% endfor %}
       </select>
     </form>
+    </div>
   </div>
 
   {% if not tickets %}
     <div class="empty-state">
       <p class="empty-title">No tickets yet</p>
       <p>New support requests will appear here when customers email in.</p>
+      <p>You can also send an email to your support address or create a ticket above.</p>
     </div>
   {% else %}
     <div class="card-list">
@@ -95,5 +51,16 @@
         </a>
       {% endfor %}
     </div>
+    {% if total_pages > 1 %}
+    <div class="pagination">
+      <span class="page-info">Page {{ page }} of {{ total_pages }} ({{ total }} tickets)</span>
+      {% if page > 1 %}
+      <a href="{{ url_for('ticket_list', page=page-1, status=request.args.get('status'), domain=request.args.get('domain')) }}" class="btn btn-ghost">Previous</a>
+      {% endif %}
+      {% if page < total_pages %}
+      <a href="{{ url_for('ticket_list', page=page+1, status=request.args.get('status'), domain=request.args.get('domain')) }}" class="btn btn-ghost">Next</a>
+      {% endif %}
+    </div>
+    {% endif %}
   {% endif %}
 {% endblock %}

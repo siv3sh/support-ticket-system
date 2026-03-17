@@ -7,24 +7,70 @@ import difflib
 import logging
 import os
 import re
-from datetime import datetime, timezone
+import secrets
+from datetime import datetime, timezone, timedelta
 from functools import wraps
 from flask import Flask, render_template, request, redirect, url_for, flash, session, jsonify
 from dotenv import load_dotenv
-from werkzeug.security import check_password_hash
+from flask_limiter import Limiter
+from flask_limiter.util import get_remote_address
+from flask_wtf.csrf import CSRFProtect
+from werkzeug.security import check_password_hash, generate_password_hash
 
 load_dotenv()
 
 import google.generativeai as genai
 
-from database import tickets, customers, agents, admins
-from email_service import send_support_reply, normalize_msg_id, get_next_ticket_number
+from bson.objectid import ObjectId
+from database import tickets, customers, agents, admins, users, audit_logs
+from email_service import (
+    get_next_ticket_number,
+    normalize_msg_id,
+    send_password_reset_email as _send_password_reset_email,
+    send_support_reply,
+    send_user_created_email,
+)
+from services.report_services import (
+    get_total_tickets_status,
+    get_average_resolution_time,
+    get_sla_metrics,
+    get_ticket_trend,
+    get_issue_distribution,
+    get_tickets_by_customer,
+    get_agent_performance,
+)
 
 app = Flask(__name__)
 app.secret_key = os.getenv("FLASK_SECRET_KEY", "dev-secret-change-in-production")
+app.config["SESSION_PERMANENT"] = True
+app.config["PERMANENT_SESSION_LIFETIME"] = timedelta(minutes=int(os.getenv("SESSION_LIFETIME_MINUTES", "60")))
+app.config["SESSION_COOKIE_HTTPONLY"] = True
+app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
+if os.getenv("FLASK_ENV") == "production":
+    app.config["SESSION_COOKIE_SECURE"] = True
+
+CSRFProtect(app)
+limiter = Limiter(key_func=get_remote_address, app=app, default_limits=["200 per day"])
+
 logger = logging.getLogger(__name__)
 
 _SENTIMENT_ANALYZER = None
+
+
+def _audit_log(action, details=None, ticket_id=None, user_id=None):
+    """Record an audit event."""
+    try:
+        audit_logs.insert_one({
+            "action": action,
+            "details": details or {},
+            "ticket_id": ticket_id,
+            "user_id": user_id or session.get("user_id"),
+            "user_email": session.get("user_email"),
+            "ip": get_remote_address(),
+            "created_at": datetime.now(timezone.utc),
+        })
+    except Exception:
+        logger.exception("Audit log insert failed")
 
 
 def login_required(f):
@@ -35,6 +81,48 @@ def login_required(f):
             return redirect(url_for("login", next=request.url))
         return f(*args, **kwargs)
     return inner
+
+
+def role_required(*allowed_roles):
+    """Decorator: require one of allowed_roles (e.g. 'admin', 'agent')."""
+    def decorator(f):
+        @wraps(f)
+        def inner(*args, **kwargs):
+            if not session.get("user_id"):
+                flash("Please log in.", "error")
+                return redirect(url_for("login", next=request.url))
+            role = (session.get("role") or "").lower()
+            if role not in [r.lower() for r in allowed_roles]:
+                flash("You do not have permission for this action.", "error")
+                return redirect(url_for("ticket_list"))
+            return f(*args, **kwargs)
+        return inner
+    return decorator
+
+
+def get_customer_ticket_pairs(user_email):
+    """For role customer: (company_id, customer_id) pairs where contact email matches user_email."""
+    if not user_email:
+        return set()
+    pairs = set()
+    for company in customers.find({}):
+        if not isinstance(company, dict):
+            continue
+        cid = company.get("_id")
+        for contact in company.get("contacts", []) or []:
+            if not isinstance(contact, dict):
+                continue
+            if (contact.get("email") or "").strip().lower() == user_email.strip().lower():
+                pairs.add((cid, contact.get("customer_id")))
+    return pairs
+
+
+def customer_can_access_ticket(ticket, user_email):
+    """True if ticket belongs to the customer (contact email = user_email)."""
+    if not ticket or not user_email:
+        return False
+    pairs = get_customer_ticket_pairs(user_email)
+    return (ticket.get("company_id"), ticket.get("customer_id")) in pairs
 
 
 def get_customer_email_for_ticket(ticket):
@@ -321,6 +409,7 @@ def _template_suggest_reply(ticket, customer_info=None):
 
 
 @app.route("/login", methods=["GET", "POST"])
+@limiter.limit("5 per minute")
 def login():
     if request.method == "GET":
         if session.get("user_id"):
@@ -331,13 +420,24 @@ def login():
     if not email:
         flash("Email is required.", "error")
         return redirect(url_for("login"))
-    user = admins.find_one({"email": email})
-    role = "admin"
+    user = None
+    role = None
+    # 1) Check unified users collection first
+    user = users.find_one({"email": email})
+    if user:
+        role = (user.get("role") or "agent").lower()
+    # 2) Fallback: legacy admins / agents
+    if not user:
+        user = admins.find_one({"email": email})
+        if user:
+            role = "admin"
     if not user:
         user = agents.find_one({"email": email})
-        role = "agent"
-    # First-time setup: if no admins/agents in DB, allow any email as admin
-    if not user and admins.count_documents({}) == 0 and agents.count_documents({}) == 0:
+        if user:
+            role = "agent"
+    # 3) First-time setup: only when explicitly allowed (dev or ALLOW_FIRST_TIME_SETUP=1)
+    allow_first_time = os.getenv("ALLOW_FIRST_TIME_SETUP", "").strip() == "1" or os.getenv("FLASK_ENV") == "development"
+    if not user and allow_first_time and users.count_documents({}) == 0 and admins.count_documents({}) == 0 and agents.count_documents({}) == 0:
         user = {"_id": "setup", "email": email, "name": email.split("@")[0], "password_hash": None}
         role = "admin"
     if not user:
@@ -354,15 +454,28 @@ def login():
     session["user_email"] = user.get("email")
     session["user_name"] = user.get("name") or email
     session["role"] = role
+    _audit_log("login", {"email": email, "role": role})
     next_url = request.args.get("next") or url_for("ticket_list")
     return redirect(next_url)
 
 
 @app.route("/logout")
 def logout():
+    _audit_log("logout", {})
     session.clear()
     flash("You have been logged out.", "success")
     return redirect(url_for("login"))
+
+
+@app.route("/health")
+def health():
+    """Health check for load balancers / monitoring."""
+    try:
+        tickets.database.client.admin.command("ping")
+        return jsonify({"status": "ok", "database": "connected"}), 200
+    except Exception as e:
+        logger.exception("Health check failed")
+        return jsonify({"status": "error", "database": str(e)}), 503
 
 
 @app.route("/")
@@ -384,18 +497,42 @@ def ticket_list():
             query["company_id"] = company["_id"]
         else:
             query["company_id"] = "__no_match__"  # no such company, show no tickets
-    ticket_list = list(tickets.find(query).sort("updated_at", -1))
+    # Customer role: only tickets where their email is the contact
+    role = (session.get("role") or "").lower()
+    if role == "customer":
+        pairs = get_customer_ticket_pairs(session.get("user_email") or "")
+        if not pairs:
+            query["$or"] = [{"company_id": "__none__", "customer_id": "__none__"}]  # match nothing
+        else:
+            query["$or"] = [{"company_id": cid, "customer_id": cvid} for (cid, cvid) in pairs]
+    # Pagination
+    per_page = max(1, min(100, int(os.getenv("TICKETS_PER_PAGE", "25"))))
+    page = max(1, int(request.args.get("page", "1")))
+    total = tickets.count_documents(query)
+    total_pages = (total + per_page - 1) // per_page if total else 1
+    page = min(page, total_pages) if total_pages else 1
+    skip = (page - 1) * per_page
+    ticket_list = list(tickets.find(query).sort("updated_at", -1).skip(skip).limit(per_page))
     # Attach customer/domain info for each ticket (customer identification & domain tagging)
     for t in ticket_list:
         t["_customer_info"] = get_customer_info_for_ticket(t)
-    # All domains for filter dropdown
-    domains = list(customers.distinct("domain"))
+    # All domains for filter dropdown (only for admin/agent/viewer)
+    domains = list(customers.distinct("domain")) if role != "customer" else []
     domains.sort()
-    return render_template("tickets_list.html", tickets=ticket_list, domains=domains)
+    return render_template(
+        "tickets_list.html",
+        tickets=ticket_list,
+        domains=domains,
+        page=page,
+        total_pages=total_pages,
+        total=total,
+        per_page=per_page,
+    )
 
 
 @app.route("/tickets/create", methods=["GET", "POST"])
 @login_required
+@role_required("admin", "agent")
 def ticket_create():
     if request.method == "GET":
         # Build list of (company_id, customer_id, label) for dropdown
@@ -439,6 +576,7 @@ def ticket_create():
         "created_at": now,
         "from_support": True,
     }
+    assigned_to = session.get("user_id") or session.get("user_email")
     tickets.insert_one({
         "_id": ticket_id,
         "thread_id": None,
@@ -448,10 +586,12 @@ def ticket_create():
         "issue": issue,
         "status": "Open",
         "priority": priority,
+        "assigned_to": assigned_to,
         "created_at": now,
         "updated_at": now,
         "comments": [initial_comment],
     })
+    _audit_log("ticket_create", {"ticket_id": ticket_id, "subject": subject}, ticket_id=ticket_id)
     flash(f"Ticket {ticket_id} created.", "success")
     return redirect(url_for("ticket_detail", ticket_id=ticket_id))
 
@@ -462,6 +602,11 @@ def ticket_detail(ticket_id):
     ticket = tickets.find_one({"_id": ticket_id})
     if not ticket:
         flash("Ticket not found.", "error")
+        return redirect(url_for("ticket_list"))
+    # Customer can only view their own tickets
+    role = (session.get("role") or "").lower()
+    if role == "customer" and not customer_can_access_ticket(ticket, session.get("user_email")):
+        flash("You do not have access to this ticket.", "error")
         return redirect(url_for("ticket_list"))
     # Sort comments by time so order is always chronological (handles timezone/naive datetimes)
     def _comment_time(c):
@@ -475,16 +620,23 @@ def ticket_detail(ticket_id):
         return 0.0
     comments = sorted([c for c in ticket.get("comments", []) if isinstance(c, dict)], key=_comment_time)
     customer_info = get_customer_info_for_ticket(ticket)
+    can_reply = role in ("admin", "agent") or (role == "customer" and customer_can_access_ticket(ticket, session.get("user_email")))
+    can_change_status = can_reply  # same as reply for simplicity
+    can_suggest_reply = role in ("admin", "agent")
     return render_template(
         "ticket_detail.html",
         ticket=ticket,
         comments=comments,
-        customer_info=customer_info
+        customer_info=customer_info,
+        can_reply=can_reply,
+        can_change_status=can_change_status,
+        can_suggest_reply=can_suggest_reply,
     )
 
 
 @app.route("/tickets/<ticket_id>/suggest-reply", methods=["GET"])
 @login_required
+@role_required("admin", "agent")
 def ticket_suggest_reply(ticket_id):
     """Return a suggested reply body using similar past replies, with Gemini as fallback."""
     ticket = tickets.find_one({"_id": ticket_id})
@@ -557,10 +709,37 @@ def ticket_reply(ticket_id):
     if not ticket:
         flash("Ticket not found.", "error")
         return redirect(url_for("ticket_list"))
+    role = (session.get("role") or "").lower()
+    if role == "customer":
+        if not customer_can_access_ticket(ticket, session.get("user_email")):
+            flash("You do not have access to this ticket.", "error")
+            return redirect(url_for("ticket_list"))
+    elif role == "viewer":
+        flash("Viewers cannot add replies.", "error")
+        return redirect(url_for("ticket_detail", ticket_id=ticket_id))
 
     body = (request.form.get("body") or "").strip()
     if not body:
         flash("Reply body is required.", "error")
+        return redirect(url_for("ticket_detail", ticket_id=ticket_id))
+
+    now = datetime.now(timezone.utc)
+
+    # Customer: add comment only (no email). Admin/Agent: send email and add support comment.
+    if role == "customer":
+        comment = {
+            "comment_id": f"cust-{ticket_id}-{now.timestamp():.0f}",
+            "message_id": f"cust-{ticket_id}-{now.timestamp():.0f}",
+            "body": body,
+            "created_at": now,
+            "from_support": False,
+        }
+        tickets.update_one(
+            {"_id": ticket_id},
+            {"$push": {"comments": comment}, "$set": {"updated_at": now}},
+        )
+        _audit_log("ticket_comment", {"from": "customer"}, ticket_id=ticket_id)
+        flash("Comment added.", "success")
         return redirect(url_for("ticket_detail", ticket_id=ticket_id))
 
     to_email = get_customer_email_for_ticket(ticket)
@@ -568,7 +747,6 @@ def ticket_reply(ticket_id):
         flash("Customer email not found for this ticket.", "error")
         return redirect(url_for("ticket_detail", ticket_id=ticket_id))
 
-    # Build thread headers from last comment so customer's reply stays in same ticket
     comments = ticket.get("comments", [])
     in_reply_to = None
     references = []
@@ -590,8 +768,6 @@ def ticket_reply(ticket_id):
         flash("Failed to send reply email.", "error")
         return redirect(url_for("ticket_detail", ticket_id=ticket_id))
 
-    # Store support reply in DB so full conversation is in one place
-    now = datetime.now(timezone.utc)
     mid = normalize_msg_id(message_id)
     support_comment = {
         "comment_id": mid,
@@ -607,6 +783,7 @@ def ticket_reply(ticket_id):
             "$set": {"updated_at": now}
         }
     )
+    _audit_log("ticket_reply", {}, ticket_id=ticket_id)
     flash("Reply sent and saved to ticket.", "success")
     return redirect(url_for("ticket_detail", ticket_id=ticket_id))
 
@@ -621,6 +798,13 @@ def ticket_update_status(ticket_id):
     if not ticket:
         flash("Ticket not found.", "error")
         return redirect(url_for("ticket_list"))
+    role = (session.get("role") or "").lower()
+    if role == "viewer":
+        flash("Viewers cannot change ticket status.", "error")
+        return redirect(url_for("ticket_detail", ticket_id=ticket_id))
+    if role == "customer" and not customer_can_access_ticket(ticket, session.get("user_email")):
+        flash("You do not have access to this ticket.", "error")
+        return redirect(url_for("ticket_list"))
     new_status = (request.form.get("status") or "").strip()
     if new_status not in ALLOWED_STATUSES:
         flash("Invalid status.", "error")
@@ -630,9 +814,352 @@ def ticket_update_status(ticket_id):
         {"_id": ticket_id},
         {"$set": {"status": new_status, "updated_at": now}}
     )
+    _audit_log("ticket_status", {"new_status": new_status}, ticket_id=ticket_id)
     flash(f"Ticket set to {new_status}.", "success")
     return redirect(url_for("ticket_detail", ticket_id=ticket_id))
 
 
+# ---------- User management (Admin only) ----------
+ROLES = [("admin", "Admin (Full access)"), ("agent", "Agent (View tickets, add comments/updates)"), ("viewer", "Viewer (View only)"), ("customer", "Customer (Own tickets only)")]
+
+
+def _get_user_by_uid(uid):
+    """Get user from users collection by id (ObjectId or string)."""
+    if not uid:
+        return None
+    try:
+        return users.find_one({"_id": ObjectId(uid)})
+    except Exception:
+        return users.find_one({"_id": uid})
+
+
+@app.route("/reports")
+@login_required
+@role_required("admin")
+def report_dashboard():
+    status_data = get_total_tickets_status()
+    avg_resolution = get_average_resolution_time()
+    sla = get_sla_metrics()
+    trend = get_ticket_trend(30)
+    issue_data = get_issue_distribution()
+    customer_data = get_tickets_by_customer()
+    agent_perf = get_agent_performance()
+    return render_template(
+        "report_dashboard.html",
+        status_data=status_data,
+        avg_resolution=avg_resolution,
+        sla=sla,
+        trend=trend,
+        issue_data=issue_data,
+        customer_data=customer_data,
+        agent_perf=agent_perf,
+    )
+
+
+@app.route("/users")
+@login_required
+@role_required("admin")
+def user_list():
+    user_list = list(users.find({}).sort("created_at", -1))
+    return render_template("user_list.html", user_list=user_list)
+
+
+@app.route("/users/create", methods=["GET", "POST"])
+@login_required
+@role_required("admin")
+def user_create():
+    if request.method == "GET":
+        return render_template("user_create.html", roles=ROLES)
+    name = (request.form.get("name") or "").strip()
+    email = (request.form.get("email") or "").strip().lower()
+    phone = (request.form.get("phone") or "").strip()
+    address = (request.form.get("address") or "").strip()
+    designation = (request.form.get("designation") or "").strip()
+    role = (request.form.get("role") or "agent").strip().lower()
+    password = request.form.get("password") or ""
+    send_temp = request.form.get("send_temp_password") == "1"
+    if not name:
+        flash("Name is required.", "error")
+        return redirect(url_for("user_create"))
+    if not email:
+        flash("Email is required.", "error")
+        return redirect(url_for("user_create"))
+    if role not in ("admin", "agent", "viewer", "customer"):
+        flash("Invalid role.", "error")
+        return redirect(url_for("user_create"))
+    if users.find_one({"email": email}):
+        flash("A user with this email already exists.", "error")
+        return redirect(url_for("user_create"))
+    if send_temp:
+        temp_password = secrets.token_urlsafe(12)
+        password_hash = generate_password_hash(temp_password)
+    else:
+        if not password:
+            flash("Password is required when not sending a temporary password.", "error")
+            return redirect(url_for("user_create"))
+        temp_password = None
+        password_hash = generate_password_hash(password)
+    now = datetime.now(timezone.utc)
+    doc = {
+        "name": name,
+        "email": email,
+        "phone": phone,
+        "address": address,
+        "designation": designation,
+        "role": role,
+        "password_hash": password_hash,
+        "is_active": True,
+        "created_at": now,
+        "updated_at": now,
+    }
+    users.insert_one(doc)
+    _audit_log("user_create", {"email": email, "role": role})
+    if send_temp and temp_password:
+        login_url = request.url_root.rstrip("/") + url_for("login")
+        send_user_created_email(email, name, temp_password, login_url)
+        flash(f"User {email} created. A temporary password was sent by email.", "success")
+    else:
+        flash(f"User {email} created.", "success")
+    return redirect(url_for("user_list"))
+
+
+@app.route("/users/<uid>/edit", methods=["GET", "POST"])
+@login_required
+@role_required("admin")
+def user_edit(uid):
+    user = _get_user_by_uid(uid)
+    if not user:
+        flash("User not found.", "error")
+        return redirect(url_for("user_list"))
+    if request.method == "GET":
+        return render_template("user_edit.html", user=user, roles=ROLES)
+    name = (request.form.get("name") or "").strip()
+    phone = (request.form.get("phone") or "").strip()
+    address = (request.form.get("address") or "").strip()
+    designation = (request.form.get("designation") or "").strip()
+    role = (request.form.get("role") or "agent").strip().lower()
+    if not name:
+        flash("Name is required.", "error")
+        return redirect(url_for("user_edit", uid=uid))
+    if role not in ("admin", "agent", "viewer", "customer"):
+        flash("Invalid role.", "error")
+        return redirect(url_for("user_edit", uid=uid))
+    now = datetime.now(timezone.utc)
+    users.update_one(
+        {"_id": user["_id"]},
+        {"$set": {"name": name, "phone": phone, "address": address, "designation": designation, "role": role, "updated_at": now}}
+    )
+    _audit_log("user_edit", {"email": user.get("email"), "role": role})
+    flash("User updated.", "success")
+    return redirect(url_for("user_list"))
+
+
+@app.route("/users/<uid>/deactivate", methods=["POST"])
+@login_required
+@role_required("admin")
+def user_deactivate(uid):
+    user = _get_user_by_uid(uid)
+    if not user:
+        flash("User not found.", "error")
+        return redirect(url_for("user_list"))
+    if str(user["_id"]) == session.get("user_id"):
+        flash("You cannot deactivate your own account.", "error")
+        return redirect(url_for("user_list"))
+    users.update_one(
+        {"_id": user["_id"]},
+        {"$set": {"is_active": False, "updated_at": datetime.now(timezone.utc)}}
+    )
+    _audit_log("user_deactivate", {"email": user.get("email")})
+    flash("User deactivated. They can no longer log in.", "success")
+    return redirect(url_for("user_list"))
+
+
+@app.route("/users/<uid>/activate", methods=["POST"])
+@login_required
+@role_required("admin")
+def user_activate(uid):
+    user = _get_user_by_uid(uid)
+    if not user:
+        flash("User not found.", "error")
+        return redirect(url_for("user_list"))
+    users.update_one(
+        {"_id": user["_id"]},
+        {"$set": {"is_active": True, "updated_at": datetime.now(timezone.utc)}}
+    )
+    _audit_log("user_activate", {"email": user.get("email")})
+    flash("User activated.", "success")
+    return redirect(url_for("user_list"))
+
+
+def _get_current_user():
+    """Get current user doc from session (users collection or legacy admins/agents)."""
+    uid = session.get("user_id")
+    email = session.get("user_email")
+    if not uid or not email:
+        return None
+    user = users.find_one({"email": email})
+    if user:
+        return user
+    user = admins.find_one({"email": email})
+    if user:
+        return user
+    user = agents.find_one({"email": email})
+    if user:
+        return user
+    # First-time setup or unknown: minimal doc from session so profile page can render
+    return {"_id": uid, "email": email, "name": session.get("user_name"), "phone": "", "address": "", "designation": "", "password_hash": None}
+
+
+@app.route("/profile", methods=["GET", "POST"])
+@login_required
+def profile():
+    user = _get_current_user()
+    if not user:
+        flash("User not found.", "error")
+        return redirect(url_for("ticket_list"))
+    # Legacy admins/agents don't have profile in users; they can only change password if we add it to legacy
+    in_users = users.find_one({"email": user.get("email")}) is not None
+    if request.method == "GET":
+        return render_template("profile.html", user=user, in_users=in_users)
+    if not in_users:
+        flash("Profile update is only available for users in the new system.", "error")
+        return redirect(url_for("ticket_list"))
+    name = (request.form.get("name") or "").strip()
+    phone = (request.form.get("phone") or "").strip()
+    address = (request.form.get("address") or "").strip()
+    designation = (request.form.get("designation") or "").strip()
+    if not name:
+        flash("Name is required.", "error")
+        return redirect(url_for("profile"))
+    users.update_one(
+        {"email": user["email"]},
+        {"$set": {"name": name, "phone": phone, "address": address, "designation": designation, "updated_at": datetime.now(timezone.utc)}}
+    )
+    session["user_name"] = name
+    flash("Profile updated.", "success")
+    return redirect(url_for("profile"))
+
+
+@app.route("/profile/change-password", methods=["GET", "POST"])
+@login_required
+def profile_change_password():
+    user = _get_current_user()
+    if not user:
+        flash("User not found.", "error")
+        return redirect(url_for("ticket_list"))
+    in_users = users.find_one({"email": user.get("email")}) is not None
+    if not in_users:
+        # Legacy: allow password change if they have password_hash (admins/agents)
+        if not user.get("password_hash"):
+            flash("Password change is not available for this account.", "error")
+            return redirect(url_for("ticket_list"))
+    if request.method == "GET":
+        return render_template("profile_change_password.html")
+    current = request.form.get("current_password") or ""
+    new_pass = request.form.get("new_password") or ""
+    confirm = request.form.get("confirm_password") or ""
+    if not current:
+        flash("Current password is required.", "error")
+        return redirect(url_for("profile_change_password"))
+    ph = user.get("password_hash")
+    if ph and not check_password_hash(ph, current):
+        flash("Current password is incorrect.", "error")
+        return redirect(url_for("profile_change_password"))
+    if not new_pass or len(new_pass) < 8:
+        flash("New password must be at least 8 characters.", "error")
+        return redirect(url_for("profile_change_password"))
+    if new_pass != confirm:
+        flash("New password and confirmation do not match.", "error")
+        return redirect(url_for("profile_change_password"))
+    password_hash = generate_password_hash(new_pass)
+    if in_users:
+        users.update_one(
+            {"email": user["email"]},
+            {"$set": {"password_hash": password_hash, "updated_at": datetime.now(timezone.utc)}}
+        )
+    else:
+        # Legacy: update admins or agents
+        if admins.find_one({"email": user["email"]}):
+            admins.update_one({"email": user["email"]}, {"$set": {"password_hash": password_hash}})
+        else:
+            agents.update_one({"email": user["email"]}, {"$set": {"password_hash": password_hash}})
+    flash("Password updated. Please log in again with your new password.", "success")
+    return redirect(url_for("logout"))
+
+
+# ---------- Forgot password ----------
+RESET_TOKEN_EXPIRE_HOURS = 1
+
+
+
+
+@app.route("/forgot-password", methods=["GET", "POST"])
+@limiter.limit("3 per minute")
+def forgot_password():
+    if request.method == "GET":
+        return render_template("forgot_password.html")
+    email = (request.form.get("email") or "").strip().lower()
+    if not email:
+        flash("Email is required.", "error")
+        return redirect(url_for("forgot_password"))
+    user = users.find_one({"email": email})
+    if not user:
+        # Don't reveal whether email exists
+        flash("If an account exists for this email, you will receive a reset link.", "success")
+        return redirect(url_for("login"))
+    if not user.get("is_active", True):
+        flash("If an account exists for this email, you will receive a reset link.", "success")
+        return redirect(url_for("login"))
+    token = secrets.token_urlsafe(32)
+    expires = datetime.now(timezone.utc) + timedelta(hours=RESET_TOKEN_EXPIRE_HOURS)
+    users.update_one(
+        {"email": email},
+        {"$set": {"password_reset_token": token, "password_reset_expires": expires}}
+    )
+    reset_link = request.url_root.rstrip("/") + url_for("reset_password", token=token)
+    if _send_password_reset_email(email, reset_link):
+        flash("If an account exists for this email, you will receive a reset link.", "success")
+    else:
+        flash("Failed to send reset email. Try again later.", "error")
+    return redirect(url_for("login"))
+
+
+@app.route("/reset-password/<token>", methods=["GET", "POST"])
+def reset_password(token):
+    user = users.find_one({"password_reset_token": token})
+    if not user or not user.get("password_reset_expires"):
+        flash("Invalid or expired reset link.", "error")
+        return redirect(url_for("login"))
+    if datetime.now(timezone.utc) > user["password_reset_expires"]:
+        users.update_one(
+            {"_id": user["_id"]},
+            {"$unset": {"password_reset_token": "", "password_reset_expires": ""}}
+        )
+        flash("Reset link has expired. Request a new one.", "error")
+        return redirect(url_for("login"))
+    if request.method == "GET":
+        return render_template("reset_password.html", token=token)
+    new_pass = request.form.get("new_password") or ""
+    confirm = request.form.get("confirm_password") or ""
+    if not new_pass or len(new_pass) < 8:
+        flash("Password must be at least 8 characters.", "error")
+        return redirect(url_for("reset_password", token=token))
+    if new_pass != confirm:
+        flash("Passwords do not match.", "error")
+        return redirect(url_for("reset_password", token=token))
+    users.update_one(
+        {"_id": user["_id"]},
+        {
+            "$set": {"password_hash": generate_password_hash(new_pass), "updated_at": datetime.now(timezone.utc)},
+            "$unset": {"password_reset_token": "", "password_reset_expires": ""}
+        }
+    )
+    _audit_log("password_reset", {"email": user.get("email")}, user_id=str(user["_id"]))
+    flash("Password updated. You can log in now.", "success")
+    return redirect(url_for("login"))
+
+
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5005, debug=True)
+    port = int(os.getenv("PORT", "5005"))
+    debug = os.getenv("FLASK_ENV") == "development" or os.getenv("DEBUG", "").lower() in ("1", "true", "yes")
+    app.run(host="0.0.0.0", port=port, debug=debug)

@@ -3,3 +3,9 @@ __pycache__/
 *.pyc
 .venv/
 venv/
+.DS_Store
+docs/.DS_Store
+docs/PROJECT_REPORT.aux
+docs/PROJECT_REPORT.log
+docs/PROJECT_REPORT.out
+docs/PROJECT_REPORT.toc

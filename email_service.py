@@ -14,7 +14,8 @@ from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from email.utils import formataddr, formatdate, make_msgid
 from dotenv import load_dotenv
-from pymongo import MongoClient
+
+from database import customers, tickets, agents, admins
 
 load_dotenv()
 
@@ -28,27 +29,12 @@ logger = logging.getLogger(__name__)
 EMAIL_ADDRESS = os.getenv("EMAIL_ADDRESS")
 EMAIL_PASSWORD = os.getenv("EMAIL_PASSWORD")
 
-IMAP_SERVER = "imap.gmail.com"
-SMTP_HOST = "smtp.gmail.com"
-SMTP_PORT = 587
+IMAP_SERVER = os.getenv("IMAP_SERVER", "imap.gmail.com")
+SMTP_HOST = os.getenv("SMTP_HOST", "smtp.gmail.com")
+SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))
 
 CHECK_INTERVAL = int(os.getenv("EMAIL_POLL_INTERVAL", "10"))
 AUTO_REPLY_ENABLED = os.getenv("AUTO_REPLY_ENABLED", "true").lower() in ("true", "1", "yes")
-
-# MongoDB
-client = MongoClient(
-    host="4.194.78.84",
-    port=27017,
-    username="infinitytestadmin",
-    password="Inf!dh7DV45aqz",
-    authSource="Infinitytest"
-)
-
-db = client["Infinitytest"]
-customers = db["customers"]
-tickets = db["tickets"]
-agents = db["agents"]
-admins = db["admins"]
 
 def normalize_msg_id(value):
     if not value:
@@ -66,7 +52,7 @@ def parse_message_ids(header_value):
 def get_next_sequence(prefix, collection, pad=3):
 
     last_doc = collection.find_one(
-        {"_id": {"$regex": f"^{prefix}-"}},
+        {"_id": {"$regex": f"^{prefix}-A"}},
         sort=[("_id", -1)]
     )
 
@@ -125,22 +111,6 @@ def extract_sender_email(from_header):
         return s.split("<")[1].split(">")[0].strip().lower()
 
     return s.lower()
-
-def get_next_sequence(prefix, collection, pad=3):
-
-    last_doc = collection.find_one(
-        {"_id": {"$regex": f"^{prefix}-A"}},
-        sort=[("_id", -1)]
-    )
-
-    if not last_doc:
-        return f"{prefix}-A{1:0{pad}d}"
-
-    try:
-        last_num = int(last_doc["_id"].split("A")[1])
-        return f"{prefix}-A{last_num + 1:0{pad}d}"
-    except:
-        return f"{prefix}-A{1:0{pad}d}"
 
 def resolve_and_update_customer(sender_email):
 
@@ -480,6 +450,80 @@ def send_support_reply(ticket_id, to_email, body, subject=None, in_reply_to=None
     except Exception as e:
         logger.error(f"Support reply failed: {e}")
         return None, None
+
+
+def send_user_created_email(to_email, name, temp_password, login_url):
+    """Send email to new user with temporary password. Returns True on success."""
+    if not to_email or not temp_password:
+        return False
+    subject = "Your support portal account"
+    body = f"""Hi {name or 'there'},
+
+Your account has been created.
+
+Email: {to_email}
+Temporary password: {temp_password}
+
+Log in here: {login_url}
+
+Please change your password after your first login (Profile → Change password).
+
+— Support Team
+"""
+    msg = MIMEMultipart()
+    msg["Subject"] = subject
+    msg["From"] = formataddr(("Support", EMAIL_ADDRESS))
+    msg["To"] = to_email
+    msg["Date"] = formatdate(localtime=False)
+    msg["Message-ID"] = make_msgid()
+    msg.attach(MIMEText(body.strip(), "plain"))
+    try:
+        with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as server:
+            server.starttls()
+            server.login(EMAIL_ADDRESS, EMAIL_PASSWORD)
+            server.sendmail(EMAIL_ADDRESS, [to_email], msg.as_string())
+        logger.info(f"User created email sent to {to_email}")
+        return True
+    except Exception as e:
+        logger.error(f"User created email failed: {e}")
+        return False
+
+
+def send_password_reset_email(to_email, reset_link):
+    """Send password reset link. Returns True on success."""
+    if not to_email or not reset_link:
+        return False
+    subject = "Reset your support portal password"
+    body = f"""Hi,
+
+You requested a password reset.
+
+Click the link below to set a new password (valid for 1 hour):
+
+{reset_link}
+
+If you didn't request this, you can ignore this email.
+
+— Support Team
+"""
+    msg = MIMEMultipart()
+    msg["Subject"] = subject
+    msg["From"] = formataddr(("Support", EMAIL_ADDRESS))
+    msg["To"] = to_email
+    msg["Date"] = formatdate(localtime=False)
+    msg["Message-ID"] = make_msgid()
+    msg.attach(MIMEText(body.strip(), "plain"))
+    try:
+        with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as server:
+            server.starttls()
+            server.login(EMAIL_ADDRESS, EMAIL_PASSWORD)
+            server.sendmail(EMAIL_ADDRESS, [to_email], msg.as_string())
+        logger.info(f"Password reset email sent to {to_email}")
+        return True
+    except Exception as e:
+        logger.error(f"Password reset email failed: {e}")
+        return False
+
 
 # pipeline
 def process_one_email(email_data):

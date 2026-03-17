@@ -1,0 +1,59 @@
+{% extends "main_layout.html" %}
+{% block title %}Users – Support{% endblock %}
+{% block extra_css %}
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/users.css') }}">
+{% endblock %}
+{% block content %}
+  <h1 class="page-title">Users</h1>
+  <div class="page-actions">
+    <a href="{{ url_for('user_create') }}" class="btn btn-primary">Add user</a>
+  </div>
+  {% if not user_list %}
+    <div class="empty-state">
+      <p class="empty-title">No users yet</p>
+      <p>Add a user to get started.</p>
+    </div>
+  {% else %}
+    <table class="user-table">
+      <thead>
+        <tr>
+          <th>Name</th>
+          <th>Email</th>
+          <th>Phone</th>
+          <th>Designation</th>
+          <th>Role</th>
+          <th>Status</th>
+          <th>Actions</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for u in user_list %}
+          <tr>
+            <td>{{ u.name or '—' }}</td>
+            <td>{{ u.email or '—' }}</td>
+            <td>{{ u.phone or '—' }}</td>
+            <td>{{ u.designation or '—' }}</td>
+            <td><span class="role-badge role-{{ (u.role or 'agent')|lower }}">{{ (u.role or 'agent')|title }}</span></td>
+            <td>{% if u.get('is_active', True) %}<span style="color: var(--success);">Active</span>{% else %}<span style="color: var(--text-muted);">Inactive</span>{% endif %}</td>
+            <td>
+              <div class="user-actions">
+                <a href="{{ url_for('user_edit', uid=u._id) }}" class="btn btn-ghost" style="padding: 0.25rem 0.5rem; font-size: 0.8125rem;">Edit</a>
+                {% if u.get('is_active', True) %}
+                <form method="post" action="{{ url_for('user_deactivate', uid=u._id) }}" style="display: inline;">
+                  <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                  <button type="submit" class="btn btn-ghost" style="padding: 0.25rem 0.5rem; font-size: 0.8125rem; color: var(--danger);">Deactivate</button>
+                </form>
+                {% else %}
+                <form method="post" action="{{ url_for('user_activate', uid=u._id) }}" style="display: inline;">
+                  <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                  <button type="submit" class="btn btn-ghost" style="padding: 0.25rem 0.5rem; font-size: 0.8125rem;">Activate</button>
+                </form>
+                {% endif %}
+              </div>
+            </td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  {% endif %}
+{% endblock %}
